@@ -34,7 +34,6 @@ separate channel during training.
 import numpy as np
 import tensorflow as tf
 from network_utility import csi_network_inc_res
-from CSI_phase_sanitization_signal_preprocessing import hampel_filter
 import CSI_phase_sanitization_signal_reconstruction as signal_reconstruction
 
 
@@ -61,55 +60,10 @@ def generate_example_data(num_trials=100, num_ap=5, num_ant=3,
 
 # %% Phase sanitization
 def sanitize_csi(stream):
-    """Sanitize CSI phases following the SHARP implementation."""
-    # remove the outer subcarriers as done in the original scripts
+    """Sanitize CSI using the official reconstruction utilities."""
     subc_slice = slice(6, -5 if stream.shape[0] > 11 else stream.shape[0])
     csi = stream[subc_slice, :]
-
-    amp = np.abs(csi)
-    # use the Hampel filter from the official preprocessing script
-    amp = hampel_filter(amp, window_size=3)
-
-    phase = np.unwrap(np.angle(csi), axis=0)
-
-    ones_vector = np.ones((2, phase.shape[0]))
-    ones_vector[1, :] = np.arange(phase.shape[0])
-
-    for tidx in range(1, phase.shape[1]):
-        stop = False
-        idx_prec = -1
-        while not stop:
-            phase_err = phase[:, tidx] - phase[:, tidx - 1]
-            diff_phase_err = np.diff(phase_err)
-            idxs_invert_up = np.argwhere(diff_phase_err > 0.9 * signal_reconstruction.mt.pi)[:, 0]
-            idxs_invert_down = np.argwhere(diff_phase_err < -0.9 * signal_reconstruction.mt.pi)[:, 0]
-            if idxs_invert_up.size > 0:
-                idx_act = idxs_invert_up[0]
-                if idx_act == idx_prec:
-                    stop = True
-                else:
-                    phase[idx_act + 1 :, tidx] -= 2 * signal_reconstruction.mt.pi
-                    idx_prec = idx_act
-            elif idxs_invert_down.size > 0:
-                idx_act = idxs_invert_down[0]
-                if idx_act == idx_prec:
-                    stop = True
-                else:
-                    phase[idx_act + 1 :, tidx] += 2 * signal_reconstruction.mt.pi
-                    idx_prec = idx_act
-            else:
-                stop = True
-
-    for tidx in range(1, phase.shape[1] - 1):
-        val_prec = phase[:, tidx - 1 : tidx]
-        val_act = phase[:, tidx : tidx + 1]
-        error = val_act - val_prec
-        temp2 = np.linalg.lstsq(ones_vector.T, error, rcond=None)[0]
-        phase[:, tidx] = phase[:, tidx] - (np.dot(ones_vector.T, temp2)).T
-
-    amp_norm = amp / np.mean(amp, axis=0, keepdims=True)
-    sanitized = amp_norm * np.exp(1j * phase)
-    return sanitized.T
+    return signal_reconstruction.sanitize_stream(csi)
 
 
 
