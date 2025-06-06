@@ -13,21 +13,24 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-"""Example script showing how to train SHARP on raw CSI data.
+"""Example Colab notebook showing how to train SHARP on raw CSI data.
 
-The raw CSI is expected as a numpy array with shape ``(trials, AP, antennas,
-subcarriers, time)`` where ``time`` is 500 samples, ``subcarriers`` are 64 and
-there are five APs. Labels are one of ``circle``, ``left-right``, ``up-down`` and
-``push-pull``.
+The raw CSI is assumed to be a ``numpy`` array with dimensions
+``(trials, APs, antennas, subcarriers, time)``. ``time`` is 500 samples,
+``subcarriers`` are 64 and there are five APs. Labels are one of ``circle``,
+``left-right``, ``up-down`` and ``push-pull``.
 
-This example now mimics the complete SHARP processing chain.  The raw complex
-measurements are first *phase sanitized* using the routines from
-``CSI_phase_sanitization_signal_preprocessing`` and
-``CSI_phase_sanitization_signal_reconstruction``.  Doppler spectra are then
-computed before feeding the data to the neural network.  Random data are
-generated only for demonstration purposes.
+This notebook implements the full SHARP preprocessing chain: phase
+sanitization using the official routines and Doppler spectrum generation.
+Random data are created for demonstration purposes, but the same workflow can
+be used with real measurements.  Each AP/antenna combination is used as a
+separate channel during training.
 """
 
+# %%
+
+
+# %% Imports
 import numpy as np
 import tensorflow as tf
 from network_utility import csi_network_inc_res
@@ -35,20 +38,28 @@ from CSI_phase_sanitization_signal_preprocessing import hampel_filter
 import CSI_phase_sanitization_signal_reconstruction as signal_reconstruction
 
 
+
+# %% Constants
 GESTURES = ["circle", "left-right", "up-down", "push-pull"]
 
 
+
+# %% Data generation
 def generate_example_data(num_trials=100, num_ap=5, num_ant=3,
                           subcarriers=64, time_samples=500):
     """Generate random complex CSI data and labels for demonstration."""
     rng = np.random.default_rng(0)
-    real = rng.standard_normal((num_trials, num_ap, num_ant, subcarriers, time_samples))
-    imag = rng.standard_normal((num_trials, num_ap, num_ant, subcarriers, time_samples))
+    real = rng.standard_normal((num_trials, num_ap, num_ant,
+                                subcarriers, time_samples))
+    imag = rng.standard_normal((num_trials, num_ap, num_ant,
+                                subcarriers, time_samples))
     data = real + 1j * imag
     labels = rng.integers(0, len(GESTURES), size=(num_trials,))
     return data.astype(np.complex64), labels
 
 
+
+# %% Phase sanitization
 def sanitize_csi(stream):
     """Sanitize CSI phases following the SHARP implementation."""
     # remove the outer subcarriers as done in the original scripts
@@ -101,6 +112,8 @@ def sanitize_csi(stream):
     return sanitized.T
 
 
+
+# %% Doppler computation
 def compute_doppler(sanitized_csi, num_symbols=51, step=1, n_fft=100, noise_db=-30):
     """Compute Doppler profiles from sanitized CSI (time, subc)."""
     profiles = []
@@ -122,23 +135,35 @@ def compute_doppler(sanitized_csi, num_symbols=51, step=1, n_fft=100, noise_db=-
     return profiles
 
 
+
+# %% Full preprocessing
 def preprocess_raw_csi(raw_csi, sample_length=340, n_fft=100):
-    """Full SHARP preprocessing: phase sanitization and Doppler spectrum."""
-    trials, aps, ants, subc, _ = raw_csi.shape
+    """Apply phase sanitization and compute Doppler profiles for all streams."""
+    trials, aps, ants, _, _ = raw_csi.shape
+
     doppler_maps = []
     for tr in range(trials):
-        stream = raw_csi[tr, 0, 0]  # use first AP and antenna for simplicity
-        sanitized = sanitize_csi(stream)
-        doppler = compute_doppler(sanitized, n_fft=n_fft)
-        if doppler.shape[0] < sample_length:
-            pad = np.zeros((sample_length - doppler.shape[0], n_fft))
-            doppler = np.concatenate([doppler, pad], axis=0)
-        else:
-            doppler = doppler[:sample_length]
-        doppler_maps.append(np.expand_dims(doppler.astype(np.float32), axis=-1))
+        channels = []
+        for ap in range(aps):
+            for ant in range(ants):
+                stream = raw_csi[tr, ap, ant]
+                sanitized = sanitize_csi(stream)
+                doppler = compute_doppler(sanitized, n_fft=n_fft)
+                if doppler.shape[0] < sample_length:
+                    pad = np.zeros((sample_length - doppler.shape[0], n_fft))
+                    doppler = np.concatenate([doppler, pad], axis=0)
+                else:
+                    doppler = doppler[:sample_length]
+                channels.append(doppler.astype(np.float32))
+
+        sample = np.stack(channels, axis=-1)
+        doppler_maps.append(sample)
+
     return np.array(doppler_maps, dtype=np.float32)
 
 
+
+# %% Dataset utilities
 def build_dataset(data, labels, batch_size=8, shuffle=True):
     dataset = tf.data.Dataset.from_tensor_slices((data, labels))
     if shuffle:
@@ -147,6 +172,8 @@ def build_dataset(data, labels, batch_size=8, shuffle=True):
     return dataset
 
 
+
+# %% Training
 def main():
     raw_csi, labels = generate_example_data()
     doppler_data = preprocess_raw_csi(raw_csi)
@@ -159,14 +186,17 @@ def main():
     num_classes = len(GESTURES)
 
     model = csi_network_inc_res(input_shape, num_classes)
-    model.compile(optimizer=tf.keras.optimizers.Adam(1e-3),
-                  loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-                  metrics=[tf.keras.metrics.SparseCategoricalAccuracy()])
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-3),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=[tf.keras.metrics.SparseCategoricalAccuracy()],
+    )
 
     model.fit(train_ds, epochs=5, verbose=2)
     loss, acc = model.evaluate(test_ds, verbose=0)
     print(f"Test accuracy: {acc:.3f}")
 
 
+# %% Execute
 if __name__ == "__main__":
     main()
